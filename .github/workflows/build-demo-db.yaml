@@ -1,0 +1,88 @@
+name: Build Demo DB
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - development
+    paths:
+      - migrations/committed/**.sql
+      - demo/demo.sql
+env:
+  NODE_VERSION: 18.13.0
+  OCASSIO_MIGRATE_ENV_PATH: ./env/migrate
+jobs:
+  # This job will
+  # 1. Create a local db
+  # 2. Restore/apply demo.sql to local db
+  # 3. Migrate the local db
+  # 4. Create a dump of the local db and commit the result
+  generate-demo-db:
+    name: Create demo.sql schema & data
+    runs-on: [self-hosted, ARM64, staging]
+    services:
+      postgres:
+        image: postgres:12
+        ports:
+        - 5432:5432
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: occasio
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 2s
+          --health-retries 5
+    env:
+      HOST: localhost
+      USER: postgres
+      DB: occasio
+      PGPASSWORD: postgres
+      DEMO_DB_DUMP: demo/demo.sql
+      NODE_ENV: demo-ci
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+      - name: Install Node
+        uses: actions/setup-node@v3
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Install Yarn
+        run: npm install --global yarn && yarn --version
+      - run: yarn install
+      - name: Apply roles.sql
+        run: psql -h $HOST -U $USER -d $DB -f demo/roles.sql
+      - name: Apply demo.sql
+        run: psql -h $HOST -U $USER -d $DB -f $DEMO_DB_DUMP
+      - name: Migrate
+        run: npx graphile-migrate watch --once
+      - name: Dump demo.sql
+        run: pg_dump -h $HOST -U $USER -d $DB --column-inserts > $DEMO_DB_DUMP
+      - name: Open PR
+        uses: peter-evans/create-pull-request@v5
+        with:
+          commit-message: "ci: Dumped/Migrated the Demo Database at demo/demo.sql"
+          title: Migrate Demo DB
+          body: Migrate the demo database from CI workflow
+          branch: ci/demo-db-migrations
+          assignees: david-AH
+          reviewers: corinz
+          add-paths: demo/demo.sql
+          delete-branch: true
+  # This job will migrate the "demo" db in RDS Staging. see env/migrate/.env.demo
+  migrate-live-db:
+    name: Update Live Demo DB
+    runs-on: [self-hosted, ARM64, staging]
+    env:
+      NODE_ENV: demo
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+      - name: Install Node
+        uses: actions/setup-node@v3
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Install Yarn
+        run: npm install --global yarn && yarn --version
+      - run: yarn install
+      - run: npx graphile-migrate migrate
