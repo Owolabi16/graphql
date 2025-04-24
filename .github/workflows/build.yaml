@@ -1,0 +1,323 @@
+name: Build Image
+on:
+  workflow_call:
+    inputs:
+      chart_dir:
+        required: true
+        type: string
+      chart_tag:
+        required: false
+        type: string
+      chart_overwrite:
+        required: true
+        type: boolean
+      is_lib_chart:
+        required: false
+        type: boolean
+        default: false
+      chart_name:
+        required: false
+        type: string
+        description: Deprecated
+      pre_build_script:
+        required: false
+        type: string
+      git_branch:
+        required: false
+        type: string
+        default: ''   
+      build-target:
+        required: false
+        type: string
+      docker-arch:
+        required: true
+        type: string
+      docker-build-args:
+        required: false
+        type: string
+      pre-build-script:
+        required: false
+        type: string
+      dockerfile-path:
+        required: false
+        type: string
+        default: "./Dockerfile"
+      custom-image-name:
+        required: false
+        type: string
+    secrets:
+      docker-build-secrets:
+        required: false
+      DOCKER_HUB_TOKEN:
+        required: true
+      PAT_TOKEN:
+        required: true      
+    outputs:
+      docker-tag:
+        description: Docker Tag Value
+        value: ${{ jobs.build-gpt-image.outputs.docker-tag }}
+      docker-repo:
+        description: Docker Registry and Repo without Tag
+        value: ${{ jobs.build-gpt-image.outputs.docker-repo }}   
+  workflow_dispatch:
+  push:
+   tags:
+     - '**'
+   branches:
+    #  - development
+     - platform-*
+     
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: 18.13.0
+  REGISTRY: ghcr.io
+  DOCKER_HUB_USER: owolabialiu
+  HELM_TEMPLATE: template.yaml
+  GPT_CHART_DIR: './.github/workflows/charts/gpt-search'
+  AGENT_CHART_DIR: './.github/workflows/charts/agent-flows'
+  CHART_OVERWRITE: 'false'
+
+jobs:
+  # Get GPT chart version
+  versions:
+    runs-on: ubuntu-latest
+    outputs:
+      chart-version: ${{ steps.extract-version.outputs.chart-version }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        with:
+          ref: ${{ inputs.git_branch }}
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ env.DOCKER_HUB_USER }}
+          password: ${{ secrets.DOCKER_HUB_TOKEN }}
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v2
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.PAT_TOKEN }}
+
+      - name: Run Pre-Build User-defined script
+        if: inputs.pre_build_script != ''
+        run: bash -c '${{ inputs.pre_build_script }}'
+
+      - name: Generate Docs
+        continue-on-error: true
+        uses: docker://jnorwood/helm-docs:v1.11.0
+        with:
+          chart_dir: ${{ env.GPT_CHART_DIR }}
+          chart_overwrite: ${{ env.CHART_OVERWRITE }}
+          entrypoint: helm-docs
+          args: -g $(basename ${{ env.GPT_CHART_DIR }})
+      
+      - name: Install Dependencies
+        run: helm dep build ${{ env.GPT_CHART_DIR }} --skip-refresh
+      
+      - name: Helm Lint
+        run: helm lint ${{ env.GPT_CHART_DIR }}
+      
+      - name: Generate template.yaml
+        if: ${{ !inputs.is_lib_chart }}
+        run: helm template ${{ env.GPT_CHART_DIR }} > ${{ env.GPT_CHART_DIR }}/$HELM_TEMPLATE && cat ${{ env.GPT_CHART_DIR }}/$HELM_TEMPLATE
+      
+      - name: KubeVal Kubernetes Objects
+        if: ${{ !inputs.is_lib_chart }}
+        run: >
+          docker run --rm -v $(pwd)/${{ env.GPT_CHART_DIR }}:/data
+          cytopia/kubeval
+          $HELM_TEMPLATE
+          --output=stdout
+          --strict
+          --ignore-missing-schemas
+      
+      - run: rm -f ${{ env.GPT_CHART_DIR }}/$HELM_TEMPLATE
+        if: ${{ !inputs.is_lib_chart }}
+      
+      - name: Get Chart Name from Chart.yaml
+        run: echo "CHART_NAME=$(yq eval .name ${{ env.GPT_CHART_DIR }}/Chart.yaml)" >> $GITHUB_ENV
+      
+      - name: Get Chart Tag/version from Chart.yaml if not inputted
+        id: extract-version
+        run: |
+          if [ "${{ inputs.chart_tag }}" == "" ]; then
+            VERSION=$(yq eval .version ${{ env.GPT_CHART_DIR }}/Chart.yaml)
+          else
+            VERSION="${{ inputs.chart_tag }}"
+          fi
+          echo "CHART_TAG=$VERSION" >> $GITHUB_ENV
+          echo "chart-version=$VERSION" >> $GITHUB_OUTPUT
+      
+      - name: Chart Registry Overwrite Protection
+        if: ${{ inputs.chart_overwrite == false }}
+        run: '! $(helm pull oci://$REGISTRY/chart/$CHART_NAME --version $CHART_TAG)'
+      
+      - name: Release Helm Chart
+        uses: appany/helm-oci-chart-releaser@v0.4.0
+        with:
+          name: ${{ env.CHART_NAME }}
+          repository: ${{ github.repository_owner }}/charts
+          tag: ${{ env.CHART_TAG }}
+          path: ${{ env.GPT_CHART_DIR }}
+          registry: ghcr.io
+          registry_username: ${{ github.repository_owner }}
+          registry_password: ${{ secrets.PAT_TOKEN }}
+        env:
+          HELM_EXPERIMENTAL_OCI: 1
+
+
+  build-image:
+    runs-on: ubuntu-latest
+    needs: 'versions'
+    outputs:
+      docker-tag: ${{ steps.meta.outputs.version }}
+      docker-repo: ${{ steps.docker-repo.outputs.DOCKER_REPOSITORY }}
+    steps:
+      - name: Login to Docker Hub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ env.DOCKER_HUB_USER }}
+          password: ${{ secrets.DOCKER_HUB_TOKEN }}
+      
+      - name: Set Docker Repository Variable
+        run: echo "DOCKER_REPOSITORY=${{ env.DOCKER_HUB_USER }}/$( echo ${{ github.repository }} | awk -F '/' '{print $2}' | awk '{print tolower($0)}' )" >> $GITHUB_ENV
+      
+      - name: Set Docker Repository Output
+        id: docker-repo
+        run: echo "DOCKER_REPOSITORY=${{ env.DOCKER_HUB_USER }}/$( echo ${{ github.repository }} | awk -F '/' '{print $2}' | awk '{print tolower($0)}' )" >> $GITHUB_OUTPUT
+      
+      - name: Set Repository Owner
+        run: echo "REPO_OWNER=$( echo ${{ github.repository_owner }} | awk '{print tolower($0)}' )" >> $GITHUB_ENV
+      
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v2
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v2
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.PAT_TOKEN }}   
+      
+      - name: Checkout
+        uses: actions/checkout@v3
+      
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v4
+        with:
+          images: |
+            ${{ inputs.custom-image-name != '' && format('{0}/{1}', env.DOCKER_HUB_USER, inputs.custom-image-name) || env.DOCKER_REPOSITORY }}
+          tags: |
+            type=schedule
+            type=ref,event=branch
+            type=ref,event=pr,suffix=${{ inputs.build-target != '' && format('-{0}', inputs.build-target) || ''}}
+            type=semver,pattern={{version}},suffix=${{ inputs.build-target != '' && format('-{0}', inputs.build-target) || ''}}
+            type=semver,pattern={{major}}.{{minor}},suffix=${{ inputs.build-target != '' && format('-{0}', inputs.build-target) || ''}}
+            type=semver,pattern={{major}},suffix=${{ inputs.build-target != '' && format('-{0}', inputs.build-target) || ''}}
+            type=sha
+            type=raw,value=${{inputs.build-target}}
+           
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          push: true
+          build-args: ${{ inputs.docker-build-args }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          file: ${{ inputs.dockerfile-path }}
+          platforms: ${{ inputs.docker-arch }}
+          pull: true
+          no-cache: false
+          cache-from: type=registry,ref=ghcr.io/${{ env.REPO_OWNER }}/cache:buildcache
+          cache-to: type=registry,ref=ghcr.io/${{ env.REPO_OWNER }}/cache:buildcache,mode=max
+          target: ${{ inputs.build-target }}
+
+  build-migration-image:
+    runs-on: ubuntu-latest
+    needs: 'versions'
+    outputs:
+      docker-tag: ${{ steps.meta.outputs.version }}
+      docker-repo: ${{ steps.docker-repo.outputs.DOCKER_REPOSITORY }}
+    steps:
+      - name: Login to Docker Hub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ env.DOCKER_HUB_USER }}
+          password: ${{ secrets.DOCKER_HUB_TOKEN }}
+      
+      - name: Set Docker Repository Variable
+        run: echo "DOCKER_REPOSITORY=${{ env.DOCKER_HUB_USER }}/$( echo ${{ github.repository }} | awk -F '/' '{print $2}' | awk '{print tolower($0)}' )" >> $GITHUB_ENV
+      
+      - name: Set Docker Repository Output
+        id: docker-repo
+        run: echo "DOCKER_REPOSITORY=${{ env.DOCKER_HUB_USER }}/$( echo ${{ github.repository }} | awk -F '/' '{print $2}' | awk '{print tolower($0)}' )" >> $GITHUB_OUTPUT
+      
+      - name: Set Repository Owner
+        run: echo "REPO_OWNER=$( echo ${{ github.repository_owner }} | awk '{print tolower($0)}' )" >> $GITHUB_ENV
+      
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v2
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v2
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.PAT_TOKEN }}   
+      
+      - name: Checkout
+        uses: actions/checkout@v3
+      
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v4
+        with:
+          images: |
+            ${{ inputs.custom-image-name != '' && format('{0}/{1}', env.DOCKER_HUB_USER, inputs.custom-image-name) || env.DOCKER_REPOSITORY }}
+          tags: |
+            type=schedule
+            type=ref,event=branch
+            type=ref,event=pr,suffix=${{ inputs.build-target != '' && format('-{0}', inputs.build-target) || ''}}
+            type=semver,pattern={{version}},suffix=${{ inputs.build-target != '' && format('-{0}', inputs.build-target) || ''}}
+            type=semver,pattern={{major}}.{{minor}},suffix=${{ inputs.build-target != '' && format('-{0}', inputs.build-target) || ''}}
+            type=semver,pattern={{major}},suffix=${{ inputs.build-target != '' && format('-{0}', inputs.build-target) || ''}}
+            type=sha
+            type=raw,value=${{inputs.build-target}}
+           
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          push: true
+          build-args: ${{ inputs.docker-build-args }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          file: ${{ inputs.dockerfile-path }}
+          platforms: ${{ inputs.docker-arch }}
+          pull: true
+          no-cache: false
+          cache-from: type=registry,ref=ghcr.io/${{ env.REPO_OWNER }}/cache:buildcache
+          cache-to: type=registry,ref=ghcr.io/${{ env.REPO_OWNER }}/cache:buildcache,mode=max
+          target: ${{ inputs.build-target }}
+
+
+
+
+
