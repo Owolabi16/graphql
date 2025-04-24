@@ -1,0 +1,70 @@
+name: Run Tests
+
+on:
+ workflow_dispatch:
+ pull_request:
+   types:
+     - opened
+     - synchronize
+   branches-ignore:
+     - ci/demo-db-migrations
+   paths-ignore:
+     - chart/**
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: 18.13.0
+  NODE_ENV: staging-test
+  OCASSIO_ENV_PATH: env/public
+  OCASSIO_MIGRATE_ENV_PATH: ./env/migrate
+  PR_NUMBER: ${{ github.event.number }}
+
+  # Used for naming the feature DB
+  GIT_BRANCH: ${{ github.head_ref || github.ref_name }}
+
+jobs:
+  run-tests:
+    name: Test
+    runs-on: [self-hosted, ARM64, staging]
+    env:
+      OCASSIO_GRAPHQL_API_LOG_LEVEL: error
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+      - name: Cache
+        uses: actions/cache@v3
+        with:
+          path: |
+            ./node_modules
+          key: ${{ runner.os }}-yarn-${{ hashFiles('yarn.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-npm-
+
+      - name: Install Node
+        uses: actions/setup-node@v3
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install Yarn
+        run: npm install --global yarn
+
+      - uses: extractions/setup-just@v1
+
+      - name: Yarn Install Dependencies
+        run: yarn install --frozen-lockfile
+
+      # comment this to run a specific test
+      - run: just drop-db
+      - run: just create-db
+      - run: just cmd=apply migrate
+
+      - name: Build and run tests
+        run: just ci-build-and-test
+        # to run a specific test, use the following command, and comment command
+        #run: just build-test && NODE_ENV=staging-test just test report
+
+      - run: just drop-db
+        if: always()
