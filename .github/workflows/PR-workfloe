@@ -1,0 +1,129 @@
+name: PR Workflow
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        type: string
+        description: "Branch to pre release"
+        required: false
+      release_level:
+        type: choice
+        description: "Pre Release level"
+        required: false
+        options:
+          - major
+          - minor
+          - patch        
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - closed
+      - submitted
+    branches-ignore:
+      - ci/demo-db-migrations
+  pull_request_review:
+    types: [submitted]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: 18.13.0
+  NODE_ENV: staging
+  OCASSIO_ENV_PATH: env/public
+  OCASSIO_MIGRATE_ENV_PATH: ./env/migrate
+  PR_NUMBER: ${{ github.event.number }}
+  GIT_BRANCH: ${{ github.head_ref || github.ref_name }}
+  
+  # Pre-release env variables
+  REGISTRY: ghcr.io
+  DOCKER_HUB_USER: owolabialiu
+  HELM_TEMPLATE: template.yaml
+  GPT_CHART_DIR: './.github/workflows/charts/gpt-search'
+  AGENT_CHART_DIR: './.github/workflows/charts/agent-flows'
+  CHART_OVERWRITE: 'false'
+
+jobs:
+  # PR OPENED/SYNCHRONIZED JOBS
+  check-formatting:
+    name: Check Code Formatting
+    if: github.event_name == 'pull_request' && (github.event.action == 'opened' || github.event.action == 'synchronize') && !startsWith(github.ref, 'platform-*')
+    runs-on: [self-hosted, ARM64, staging]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+      - name: Node 18 install
+        uses: actions/setup-node@v3
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Prettier
+        run: npx prettier --check .
+
+  create-db:
+    name: Create Feature Database and Migrate
+    if: github.event_name == 'pull_request' && (github.event.action == 'opened' || github.event.action == 'synchronize') && !startsWith(github.ref, 'platform-*')
+    runs-on: [self-hosted, ARM64, staging]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+      - name: Cache
+        uses: actions/cache@v3
+        with:
+          path: |
+            ./node_modules
+          key: ${{ runner.os }}-yarn-${{ hashFiles('yarn.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-npm-
+      - name: Install Node
+        uses: actions/setup-node@v3
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Install Yarn
+        run: npm install --global yarn && yarn --version
+      - run: yarn install
+      - name: Install "just"
+        uses: extractions/setup-just@v1
+      - run: just drop-db
+      - run: just create-db
+      - run: just cmd=apply migrate
+
+  build-image:
+    if: github.event_name == 'pull_request' && (github.event.action == 'opened' || github.event.action == 'synchronize') && !startsWith(github.ref, 'platform-*')
+    uses: occasio-technology-solutions/infra/.github/workflows/build-image.yaml@development
+    with:
+      docker-arch: linux/arm64
+    secrets: inherit
+
+  build-migration-image:
+    if: github.event_name == 'pull_request' && (github.event.action == 'opened' || github.event.action == 'synchronize') && !startsWith(github.ref, 'platform-*')
+    uses: occasio-technology-solutions/infra/.github/workflows/build-image.yaml@development
+    with:
+      docker-arch: linux/arm64
+      build-target: "migration"
+    secrets: inherit
+
+  # PR CLOSED JOBS
+  drop-db:
+    name: Destroy Staging Database
+    if: github.event_name == 'pull_request' && github.event.action == 'closed'
+    runs-on: [self-hosted, ARM64, staging]
+    env:
+      NODE_ENV: staging
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+      - name: Install "just"
+        uses: extractions/setup-just@v1
+      - run: just drop-db
+
+  drop-test-db:
+    name: Destroy Testing Database
+    if: github.event_name == 'pull_request' && github.event.action == 'closed'
+    runs-on: [self-hosted, ARM64, staging]
+    env:
+      NODE_ENV: staging-test
+    steps:
+      - name: Checkout
+        uses: actions/checkout
