@@ -55,7 +55,7 @@ on:
     outputs:
       docker-tag:
         description: Docker Tag Value
-        value: ${{ jobs.build-gpt-image.outputs.docker-tag }}
+        value: ${{  jobs.build-image.outputs.docker-tag }}
       docker-repo:
         description: Docker Registry and Repo without Tag
         value: ${{ jobs.build-gpt-image.outputs.docker-repo }}   
