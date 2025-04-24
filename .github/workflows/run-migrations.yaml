@@ -1,0 +1,50 @@
+name: Run Migrations
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - development
+    paths:
+      - migrations/committed/**.sql
+env:
+  NODE_VERSION: 18.13.0
+  OCASSIO_MIGRATE_ENV_PATH: ./env/migrate
+jobs:
+  run-staging-migrations:
+    name: Run Migration on Staging RDS
+    runs-on: [self-hosted, ARM64, staging]
+    env:
+      NODE_ENV: staging
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+      - name: Install Node 18
+        uses: actions/setup-node@v3
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Install Yarn
+        run: npm install --global yarn && yarn --version
+      - run: yarn install
+      - name: Install "just"
+        uses: extractions/setup-just@v1
+      - name: Run Committed Migrations
+        run: NODE_ENV=staging just migrate
+  run-test-db-migrations:
+    name: Run Migration on Test RDS
+    runs-on: [self-hosted, ARM64, staging]
+    env:
+      NODE_ENV: staging-test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+      - name: Install Node 18
+        uses: actions/setup-node@v3
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Install Yarn
+        run: npm install --global yarn && yarn --version
+      - run: yarn install
+      - name: Install "just"
+        uses: extractions/setup-just@v1
+      - name: Run Committed Migrations
+        run: NODE_ENV=staging-test just migrate
