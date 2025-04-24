@@ -1,0 +1,35 @@
+name: Drop DB
+on:
+  pull_request:
+    types:
+      - closed
+    branches-ignore:
+      - ci/demo-db-migrations
+env:
+  # Used for naming the feature DB
+  GIT_BRANCH: ${{ github.head_ref || github.ref_name }}
+  PR_NUMBER: ${{ github.event.number }}
+  OCASSIO_ENV_PATH: env/public
+jobs:
+  drop-db:
+    name: Destroy Staging Database
+    runs-on: [self-hosted, ARM64, staging]
+    env:
+      NODE_ENV: staging
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+      - name: Install "just"
+        uses: extractions/setup-just@v1
+      - run: just drop-db
+  drop-test-db:
+    name: Destroy Testing Database
+    runs-on: [self-hosted, ARM64, staging]
+    env:
+      NODE_ENV: staging-test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+      - name: Install "just"
+        uses: extractions/setup-just@v1
+      - run: just drop-db
